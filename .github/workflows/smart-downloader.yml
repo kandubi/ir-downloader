@@ -114,5 +114,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/
-          git commit -m "Add downloaded file: ${{ env.SAFE_NAME }} (category: ${{ env.CAT }}) - link: ${{ github.event.inputs.file_url }}|| echo "Nothing to commit"
+          git commit -m "Add downloaded file: ${{ env.SAFE_NAME }} (category: ${{ env.CAT }}) - link: ${{ github.event.inputs.file_url }}" || echo "Nothing to commit"
           git push
