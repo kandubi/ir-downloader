@@ -54,7 +54,6 @@ jobs:
           MIME=$(file -b --mime-type downloaded_file)
           EXT="${RAW_NAME##*.}"
           EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          
           if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
             CAT="video"
           elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
@@ -69,6 +68,7 @@ jobs:
           
           echo "CAT=$CAT" >> $GITHUB_ENV
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          echo "RAW_NAME=$RAW_NAME" >> $GITHUB_ENV
           echo "✅ دسته: $CAT → زیرپوشه: $SAFE_NAME"
 
       - name: 🗜️ فشرده‌سازی و تقسیم (با اعمال رمز)
@@ -76,17 +76,23 @@ jobs:
           # پوشه نهایی: downloads/دسته/نام فایل/
           FINAL_DIR="downloads/${{ env.CAT }}/${{ env.SAFE_NAME }}"
           mkdir -p "$FINAL_DIR"
-          
           # حذف فایل‌های قبلی در آن زیرپوشه (در صورت وجود) تا تداخل پیش نیاید
           rm -f "$FINAL_DIR"/*.7z*
           
-          # فشرده‌سازی
-          if [ -z "${{ github.event.inputs.password }}" ]; then
-            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
-          else
-            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
-          fi
+          # استفاده از نام اصلی فایل (به عنوان مثال: my movie.mp4)
+          ORIGINAL_NAME="${{ env.RAW_NAME }}"
           
+          # نام آرشیو با پیشوند dl
+          ARCHIVE_NAME="dl${ORIGINAL_NAME}.7z"
+          
+          # نام‌گذاری مجدد فایل دانلود شده
+          mv downloaded_file "$ORIGINAL_NAME"
+          
+          if [ -z "${{ github.event.inputs.password }}" ]; then
+            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$ORIGINAL_NAME"
+          else
+            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$ORIGINAL_NAME"
+          fi
           echo "✅ فایل در $FINAL_DIR ذخیره شد"
           ls -lh "$FINAL_DIR"
 
