@@ -1,0 +1,133 @@
+name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: '🔗 List of direct download URLs (comma‑separated)'
+        required: true
+        type: string
+      password:
+        description: '🔐 Password for compressed files (optional)'
+        required: false
+        type: string
+        default: ''
+      split_size:
+        description: '📦 Split size (default: 95m, e.g. 95m, 100m, 200m)'
+        required: false
+        type: string
+        default: '95m'
+      download_type:
+        description: '💾 How to store the file: direct or zip'
+        required: false
+        type: choice
+        options:
+          - direct
+          - zip
+        default: zip
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔄 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file
+
+      - name: 🗂️ Prepare environment
+        run: |
+          echo "COMMIT_MSG=" >> $GITHUB_ENV
+          echo "FILE_LIST=()" >> $GITHUB_ENV
+          echo "CHECKSUMS=()" >> $GITHUB_ENV
+
+      - name: 📥 Download & process each file
+        id: process
+        run: |
+          IFS=',' read -ra URLS <<< "${{ github.event.inputs.file_urls }}"
+          for URL in "${URLS[@]}"; do
+            URL=$(echo "$URL" | xargs)   # trim whitespace
+            echo "Processing: $URL"
+
+            # ---------- 1. Determine original name ----------
+            RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
+            RAW_NAME=${RAW_NAME:-unknown_file}
+            SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+
+            # ---------- 2. Download ----------
+            curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
+            if [ $? -ne 0 ]; then
+              echo "❌ Failed to download $URL"
+              continue
+            fi
+
+            # ---------- 3. Detect MIME & category ----------
+            MIME=$(file -b --mime-type downloaded_file)
+            EXT="${RAW_NAME##*.}"
+            EXT=${EXT,,}
+            if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
+              CAT="video"
+            elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
+              CAT="audio"
+            elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
+              CAT="image"
+            elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
+              CAT="document"
+            else
+              CAT="other"
+            fi
+
+            # ---------- 4. Compute checksum ----------
+            CHECKSUM=$(sha256sum downloaded_file | awk '{print $1}')
+            echo "Checksum: $CHECKSUM"
+
+            # ---------- 5. Prepare final directory ----------
+            FINAL_DIR="downloads/${CAT}/${SAFE_NAME}"
+            mkdir -p "$FINAL_DIR"
+
+            # ---------- 6. Store file ----------
+            if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+              # Store original file as-is
+              mv downloaded_file "${FINAL_DIR}/"
+            else
+              # Zip/7z the file
+              if [ -z "${{ github.event.inputs.password }}" ]; then
+                7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/archive.7z" "./downloaded_file"
+              else
+                7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/archive.7z" "./downloaded_file"
+              fi
+              rm -f downloaded_file
+            fi
+
+            # ---------- 7. Record for commit ----------
+            FILE_LIST+=("$SAFE_NAME")
+            CHECKSUMS+=("$CHECKSUM")
+          done
+
+          # ---------- 8. Build commit message ----------
+          MSG="Add downloaded files: $(IFS=,; echo "${FILE_LIST[*]}")"
+          MSG+="\nChecksums: $(IFS=,; echo "${CHECKSUMS[*]}")"
+          echo "$MSG" > commit_msg.txt
+          echo "COMMIT_MSG=$(cat commit_msg.txt)" >> $GITHUB_ENV
+
+          # ---------- 9. Clean up temporary files ----------
+          rm -f downloaded_file
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: 📝 Commit & push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -F "$COMMIT_MSG"
+            git push
+          fi
