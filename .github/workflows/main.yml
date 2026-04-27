@@ -1,12 +1,22 @@
-name: '📦 دانلود و ذخیره در مخزن'
+name: 📦 حرفه‌ای: دانلود و ذخیره در مخزن (با Matrix)
 
 on:
   workflow_dispatch:
     inputs:
-      file_url:
-        description: '🔗 لینک مستقیم فایل'
+      file_urls:
+        description: |
+          🔗 چند لینک (به‌صورت جداشده با کاما یا newline)
+          مثال: https://example.com/a.mp4, https://example.com/b.zip
         required: true
         type: string
+      download_type:
+        description: '💾 How to store the file: direct or zip'
+        required: false
+        type: choice
+        options:
+          - direct
+          - zip
+        default: direct
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
@@ -19,11 +29,30 @@ on:
         default: '95m'
 
 permissions:
-  contents: write  # مهم: اجازه پوش به مخزن
+  contents: write
 
 jobs:
-  download-and-commit:
+  # 1️⃣ ابتدا آرایهٔ URLها را استخراج می‌کنیم
+  create-matrix:
     runs-on: ubuntu-latest
+    outputs:
+      urls: ${{ steps.set-matrix.outputs.urls }}
+    steps:
+      - name: 📋 استخراج URLها
+        id: set-matrix
+        run: |
+          # 1) خطوط را با \n جدا می‌کنیم
+          urls=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
+          echo "urls=$urls" >> "$GITHUB_OUTPUT"
+
+  # 2️⃣ دانلود & commit برای هر URL (یک job)
+  download:
+    needs: create-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        url: ${{ fromJson(needs.create-matrix.outputs.urls) }}
+      fail-fast: false   # حتی اگر یک فایل خطا کند، بقیه ادامه پیدا می‌کنند
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
@@ -36,64 +65,65 @@ jobs:
       - name: 📥 دانلود فایل
         id: download
         run: |
-          URL="${{ github.event.inputs.file_url }}"
+          URL="${{ matrix.url }}"
           echo "در حال دانلود از: $URL"
           curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
           if [ $? -ne 0 ]; then exit 1; fi
           ls -lh downloaded_file
 
+      # همان مراحل کلاسیک «کلاسیک» (تشخیص دسته، فشرده‌سازی، تقسیم، …)
       - name: 🧠 تشخیص نوع و استخراج نام اصلی
         id: classify
         run: |
-          # نام اصلی از لینک
-          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
-          if [ -z "$RAW_NAME" ]; then RAW_NAME="unknown_file"; fi
-          # حذف کاراکترهای غیرمجاز برای نام پوشه (جایگزینی با _)
+          RAW_NAME=$(basename "${{ matrix.url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
+          [ -z "$RAW_NAME" ] && RAW_NAME="unknown_file"
           SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
-          # تشخیص MIME
           MIME=$(file -b --mime-type downloaded_file)
           EXT="${RAW_NAME##*.}"
           EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          
-          if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
-            CAT="video"
-          elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
-            CAT="audio"
-          elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
-            CAT="image"
-          elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
-            CAT="document"
-          else
-            CAT="other"
-          fi
-          
+          case "$MIME" in
+            video/*) CAT="video" ;;
+            audio/*) CAT="audio" ;;
+            image/*) CAT="image" ;;
+            application/pdf) CAT="document" ;;
+            *) 
+              if [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then CAT="video"; 
+              elif [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then CAT="audio";
+              elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then CAT="image";
+              elif [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then CAT="document";
+              else CAT="other"; fi ;;
+          esac
           echo "CAT=$CAT" >> $GITHUB_ENV
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          echo "RAW_NAME=$RAW_NAME" >> $GITHUB_ENV
           echo "✅ دسته: $CAT → زیرپوشه: $SAFE_NAME"
 
       - name: 🗜️ فشرده‌سازی و تقسیم (با اعمال رمز)
         run: |
-          # پوشه نهایی: downloads/دسته/نام فایل/
           FINAL_DIR="downloads/${{ env.CAT }}/${{ env.SAFE_NAME }}"
           mkdir -p "$FINAL_DIR"
-          
-          # حذف فایل‌های قبلی در آن زیرپوشه (در صورت وجود) تا تداخل پیش نیاید
-          rm -f "$FINAL_DIR"/*.7z*
-          
-          # فشرده‌سازی
-          if [ -z "${{ github.event.inputs.password }}" ]; then
-            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
+          ORIGINAL_NAME="${{ env.SAFE_NAME }}"
+          mv downloaded_file "$ORIGINAL_NAME"
+
+          if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+            rm -f "$FINAL_DIR"/*.*
+            mv "$ORIGINAL_NAME" "${FINAL_DIR}/"
           else
-            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
+            rm -f "$FINAL_DIR"/*.7z*
+            ARCHIVE_NAME="dl_${ORIGINAL_NAME}.7z"
+            if [ -z "${{ github.event.inputs.password }}" ]; then
+              7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$ORIGINAL_NAME"
+            else
+              7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$ORIGINAL_NAME"
+            fi
           fi
-          
           echo "✅ فایل در $FINAL_DIR ذخیره شد"
           ls -lh "$FINAL_DIR"
 
-      - name: 📝 کامیت و پوش به مخزن
+      - name: 📝 commit & push به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/
-          git commit -m "Add downloaded file: ${{ env.SAFE_NAME }} (category: ${{ env.CAT }})" || echo "Nothing to commit"
+          git commit -m "Add downloaded file: ${{ env.SAFE_NAME }} (category: ${{ env.CAT }}) - link: ${{ matrix.url }}" || echo "Nothing to commit"
           git push
