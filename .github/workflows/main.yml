@@ -46,7 +46,7 @@ jobs:
 
           # ۲. به‌صورت آرایه‌ی JSON تبدیل می‌کنیم
           #   - jq در Ubuntu‑latest نصب است
-          urls_json=$(printf '%s\n' "$urls_raw" | jq -R . | jq -s .)
+          urls_json=$(printf '%s\n' "$urls_raw" | jq -R -s -c .)
 
           # ۳. خروجی را به GITHUB_OUTPUT می‌نویسیم
           echo "urls=$urls_json" >> "$GITHUB_OUTPUT"
