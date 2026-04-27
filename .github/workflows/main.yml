@@ -5,7 +5,7 @@ on:
     inputs:
       file_urls:
         description: |
-          🔗 چند لینک (جدا شده با کاما یا newline)  
+          🔗 چند لینک (با کاما یا newline)  
           مثال: https://example.com/a.mp4, https://example.com/b.zip
         required: true
         type: string
@@ -31,30 +31,34 @@ on:
 permissions:
   contents: write   # اجازه push به مخزن
 
-# ------------------- 1️⃣ تبدیل ورودی به آرایه‌ی JSON -------------------
+# ------------------------------------------------------------------
+# 1️⃣ تبدیل ورودی به آرایه JSON
+# ------------------------------------------------------------------
 jobs:
   create-matrix:
     runs-on: ubuntu-latest
     outputs:
-      urls: ${{ steps.make-json.outputs.urls }}
+      urls: ${{ steps.json.outputs.urls }}
     steps:
-      - name: 📋 تبدیل ورودی به آرایه JSON
-        id: make-json
+      - name: 📋 پارس کردن ورودی
+        id: json
         run: |
-          # 1️⃣ جدا کردن لینک‌ها با کاما/خط جدید
-          urls_raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
-          # 2️⃣ تبدیل به آرایه JSON در یک خط
-          urls_json=$(printf '%s\n' "$urls_raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
-          echo "urls=${urls_json}" >> "$GITHUB_OUTPUT"
+          # جدا کردن لینک‌ها با کاما یا newline
+          raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
+          # تبدیل به آرایه JSON در یک خط
+          arr=$(printf '%s\n' "$raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
+          echo "urls=$arr" >> "$GITHUB_OUTPUT"
 
-  # ------------------- 2️⃣ دانلود با Matrix -------------------
+# ------------------------------------------------------------------
+# 2️⃣ دانلود و ذخیره در پوشه مشترک
+# ------------------------------------------------------------------
   download:
     needs: create-matrix
     runs-on: ubuntu-latest
     strategy:
       matrix:
         url: ${{ fromJson(needs.create-matrix.outputs.urls) }}
-      fail-fast: false   # اگر یک فایل خطا کرد، بقیه ادامه می‌یابند
+      fail-fast: false
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
@@ -66,19 +70,15 @@ jobs:
 
       - name: 📥 دانلود & پردازش فایل
         run: |
-          # -----------------------------------------------------------------
-          # 1️⃣ پارس کردن URL و تنظیم نام امن
-          # -----------------------------------------------------------------
           URL="${{ matrix.url }}"
           echo "🔗 دانلود می‌شود: $URL"
 
-          # 2️⃣ دانلود
           if ! curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"; then
             echo "::warning::خطا در دانلود $URL. ادامه به فایل بعدی."
             exit 1
           fi
 
-          # 3️⃣ تشخیص نوع MIME و استخراج نام اصلی
+          # تشخیص نوع MIME و استخراج نام امن
           RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
           [ -z "$RAW_NAME" ] && RAW_NAME="unknown_file"
           SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
@@ -99,9 +99,7 @@ jobs:
           esac
           echo "✅ دسته: $CAT → نام امن: $SAFE_NAME"
 
-          # -----------------------------------------------------------------
-          # 4️⃣ فشرده‌سازی یا ذخیره مستقیم در پوشه مشترک
-          # -----------------------------------------------------------------
+          # فایل را در پوشه مشترک ذخیره می‌کنیم
           FINAL_DIR="downloads/all"
           mkdir -p "$FINAL_DIR"
 
@@ -119,10 +117,14 @@ jobs:
           echo "✅ فایل در $FINAL_DIR ذخیره شد"
           ls -lh "$FINAL_DIR"
 
-  # ------------------- 3️⃣ Commit & Push -------------------
+# ------------------------------------------------------------------
+# 3️⃣ Commit & Push (به‌روز شده)
+# ------------------------------------------------------------------
   commit:
     needs: download
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # اطمینان از احراز هویت
     steps:
       - name: 🔄 دریافت کد مخزن (دوباره)
         uses: actions/checkout@v4
@@ -131,8 +133,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add downloads/
-          # پیام commit شامل لینک‌های تمام فایل‌ها
-          COMMIT_MSG="Add downloaded files: $(git status --porcelain | awk '{print $2}')\n\nLinks:\n${{ github.event.inputs.file_urls }}"
-          git commit -m "$COMMIT_MSG" || echo "Nothing to commit"
-          git push
+
+          # اگر هیچ تغییری نباشد، skip commit
+          if git diff-index --quiet HEAD --; then
+            echo "هیچ تغییر جدیدی وجود ندارد. ادامه می‌شود."
+          else
+            git commit -m "Add downloaded files: $(git status --porcelain | awk '{print $2}')"
+            # push به همان branch که workflow را اجرا کرده (مثلاً refs/heads/main)
+            git push
+          fi
