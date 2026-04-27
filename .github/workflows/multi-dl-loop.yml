@@ -1,0 +1,119 @@
+name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن (حلقه)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: |
+          🔗 چند لینک (به‌صورت جداشده با کاما یا newline)
+          مثال: https://example.com/a.mp4, https://example.com/b.zip
+        required: true
+        type: string
+      download_type:
+        description: '💾 How to store the file: direct or zip'
+        required: false
+        type: choice
+        options:
+          - direct
+          - zip
+        default: direct
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      split_size:
+        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔄 دریافت کد مخزن
+        uses: actions/checkout@v4
+
+      - name: ⚙️ نصب ابزارها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file jq
+
+      - name: 📥 دانلود همه فایل‌ها به صورت حلقه
+        run: |
+          # ---------- 1️⃣ پارس کردن لیست URLها ----------
+          # ۱) جدا کردن با کاما/خط جدید و حذف فضاهای خالی
+          URLS=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
+
+          # ---------- 2️⃣ حلقه اصلی ----------
+          # ما یک پوشه مشترک برای تمام فایل‌ها می‌سازیم
+          # اگر می‌خواهید به‌صورت دسته‌سازی (video/audio/…) نگه دارید، آن را در اینجا اضافه کنید.
+          # در این مثال همه‌ی فایل‌ها در پوشه‌ی `downloads/all` قرار می‌گیرند.
+          FINAL_DIR="downloads/all"
+          mkdir -p "$FINAL_DIR"
+
+          echo "📂 آماده‌سازی پوشه: $FINAL_DIR"
+
+          # 2) برای هر URL یکبار پردازش می‌کنیم
+          while read -r URL; do
+            [ -z "$URL" ] && continue
+            echo "---------------------------"
+            echo "🔗 دانلود: $URL"
+
+            # دانلود
+            if ! curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"; then
+              echo "::warning::خطا در دانلود $URL. ادامه به فایل بعدی."
+              continue
+            fi
+
+            # ---------- 3️⃣ تشخیص دسته و نامگذاری ----------
+            RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
+            [ -z "$RAW_NAME" ] && RAW_NAME="unknown_file"
+            SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+            MIME=$(file -b --mime-type downloaded_file)
+            EXT="${RAW_NAME##*.}"
+            EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+            case "$MIME" in
+              video/*) CAT="video" ;;
+              audio/*) CAT="audio" ;;
+              image/*) CAT="image" ;;
+              application/pdf) CAT="document" ;;
+              *) 
+                if [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then CAT="video";
+                elif [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then CAT="audio";
+                elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then CAT="image";
+                elif [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then CAT="document";
+                else CAT="other"; fi ;;
+            esac
+
+            echo "✅ دسته: $CAT → نام امن: $SAFE_NAME"
+
+            # ---------- 4️⃣ فشرده‌سازی / ذخیره مستقیم ----------
+            if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+              mv downloaded_file "${FINAL_DIR}/${SAFE_NAME}"
+            else
+              ARCHIVE_NAME="dl_${SAFE_NAME}.7z"
+              if [ -z "${{ github.event.inputs.password }}" ]; then
+                7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/${ARCHIVE_NAME}" "./downloaded_file"
+              else
+                7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/${ARCHIVE_NAME}" "./downloaded_file"
+              fi
+              # حذف فایل اصلی (فقط اگر بخواهیم)
+              rm -f downloaded_file
+            fi
+
+            echo "✅ فایل ذخیره شد در $FINAL_DIR"
+            ls -lh "$FINAL_DIR"
+          done <<< "$URLS"
+
+      - name: 📝 commit و push به مخزن
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          git commit -m "Add downloaded files: $(git status --porcelain | awk '{print $2}') – links: ${{ github.event.inputs.file_urls }}" || echo "Nothing to commit"
+          git push
