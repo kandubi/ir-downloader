@@ -41,15 +41,18 @@ jobs:
       - name: 📋 استخراج URLها
         id: set-matrix
         run: |
-          # ۱. فهرست URLها را با newline جدا می‌کنیم
+          # 1️⃣ خطوط (یا کاما) را جدا می‌کنیم و فضاهای خالی را حذف می‌کنیم
           urls_raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
 
-          # ۲. به‌صورت آرایه‌ی JSON تبدیل می‌کنیم
-          #   - jq در Ubuntu‑latest نصب است
-          urls_json=$(printf '%s\n' "$urls_raw" | jq -R -s -c .)
+          # 2️⃣ تبدیل به آرایه‌ی JSON در یک خط (compact)
+          #    - `-R` → رشته‌های خام  
+          #    - `-s` → تمام خط‌ها را به یک رشته جمع می‌کند  
+          #    - `split("\n")` → تبدیل به آرایه بر اساس newline  
+          #    - `map(select(length>0))` → حذف خطوط خالی  
+          urls_json=$(printf '%s\n' "$urls_raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
 
-          # ۳. خروجی را به GITHUB_OUTPUT می‌نویسیم
-          echo "urls=$urls_json" >> "$GITHUB_OUTPUT"
+          # 3️⃣ خروجی را در GITHUB_OUTPUT می‌نویسیم
+          echo "urls=${urls_json}" >> "$GITHUB_OUTPUT"
 
   # 2️⃣ دانلود & commit برای هر URL (یک job)
   download:
