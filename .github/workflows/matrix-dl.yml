@@ -48,33 +48,42 @@ jobs:
     steps:
       - id: make
         run: |
-          raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
+          raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^ *//;s/ *$//')
+      
           mapfile -t urls < <(printf '%s\n' "$raw" | sed '/^$/d')
-
+      
           BATCH=${{ github.event.inputs.commit_batch_size }}
-
+      
           result="[]"
           batch=()
           count=0
-
+      
           for url in "${urls[@]}"; do
             batch+=("$url")
             count=$((count+1))
-
+      
             if [ "$count" -eq "$BATCH" ]; then
               json=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -s .)
-              result=$(echo "$result" | jq ". + [$json]")
+              result=$(echo "$result" | jq -c ". + [$json]")
               batch=()
               count=0
             fi
           done
-
+      
           if [ ${#batch[@]} -gt 0 ]; then
             json=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -s .)
-            result=$(echo "$result" | jq ". + [$json]")
+            result=$(echo "$result" | jq -c ". + [$json]")
           fi
-
-          echo "batches=$result" >> "$GITHUB_OUTPUT"
+      
+          echo "Generated batches:"
+          echo "$result"
+      
+          # ✅ مهم: استفاده از multiline output
+          {
+            echo "batches<<EOF"
+            echo "$result"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
 # -----------------------------------------
 # 2️⃣ دانلود + commit ایمن
