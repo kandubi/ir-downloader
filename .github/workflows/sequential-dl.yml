@@ -4,26 +4,31 @@ on:
   workflow_dispatch:
     inputs:
       file_urls:
+        description: '🔗 لینک‌ها (کاما یا newline)'
         required: true
         type: string
 
       commit_batch_size:
+        description: '📦 تعداد فایل در هر batch'
         required: false
         type: number
         default: 5
 
       download_type:
+        description: '💾 نوع ذخیره'
         required: false
         type: choice
         options: [direct, zip]
         default: direct
 
       password:
+        description: '🔐 (فقط برای zip)'
         required: false
         type: string
         default: ''
 
       split_size:
+        description: '📦 (فقط برای zip)'
         required: false
         type: string
         default: '95m'
