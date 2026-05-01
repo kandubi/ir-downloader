@@ -4,143 +4,159 @@ on:
   workflow_dispatch:
     inputs:
       file_urls:
-        description: |
-          🔗 چند لینک (با کاما یا newline)  
-          مثال: https://example.com/a.mp4, https://example.com/b.zip
+        description: '🔗 لینک‌ها (کاما یا newline)'
         required: true
         type: string
+
       download_type:
-        description: '💾 How to store the file: direct or zip'
+        description: '💾 نوع ذخیره'
         required: false
         type: choice
-        options:
-          - direct
-          - zip
+        options: [direct, zip]
         default: direct
+
       password:
-        description: '🔐 رمز فایل فشرده (اختیاری)'
+        description: '🔐 رمز zip'
         required: false
         type: string
         default: ''
+
       split_size:
-        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+        description: '📦 حجم هر پارت'
         required: false
         type: string
         default: '95m'
 
-permissions:
-  contents: write   # اجازه push به مخزن
+      commit_batch_size:
+        description: '📦 هر چند فایل یک commit شود'
+        required: false
+        type: number
+        default: 1
 
-# ------------------------------------------------------------------
-# 1️⃣ تبدیل ورودی به آرایه JSON
-# ------------------------------------------------------------------
+permissions:
+  contents: write
+
+# -----------------------------------------
+# 1️⃣ ساخت ماتریس
+# -----------------------------------------
 jobs:
   create-matrix:
     runs-on: ubuntu-latest
     outputs:
       urls: ${{ steps.json.outputs.urls }}
+
     steps:
-      - name: 📋 پارس کردن ورودی
+      - name: parse input
         id: json
         run: |
-          # جدا کردن لینک‌ها با کاما یا newline
           raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | tr -d ' ')
-          # تبدیل به آرایه JSON در یک خط
           arr=$(printf '%s\n' "$raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
           echo "urls=$arr" >> "$GITHUB_OUTPUT"
 
-# ------------------------------------------------------------------
-# 2️⃣ دانلود و ذخیره در پوشه مشترک
-# ------------------------------------------------------------------
+# -----------------------------------------
+# 2️⃣ دانلود موازی + artifact
+# -----------------------------------------
   download:
     needs: create-matrix
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
         url: ${{ fromJson(needs.create-matrix.outputs.urls) }}
-      fail-fast: false
-    steps:
-      - name: 🔄 دریافت کد مخزن
-        uses: actions/checkout@v4
 
-      - name: ⚙️ نصب ابزارهای لازم
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full file jq
 
-      - name: 📥 دانلود & پردازش فایل
+      - name: download file
         run: |
           URL="${{ matrix.url }}"
-          echo "🔗 دانلود می‌شود: $URL"
+          echo "Downloading: $URL"
 
-          if ! curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"; then
-            echo "::warning::خطا در دانلود $URL. ادامه به فایل بعدی."
+          if ! curl -L --fail --retry 5 --retry-delay 5 -o file "$URL"; then
+            echo "::warning::Download failed"
             exit 1
           fi
 
-          # تشخیص نوع MIME و استخراج نام امن
           RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
-          [ -z "$RAW_NAME" ] && RAW_NAME="unknown_file"
-          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
-          MIME=$(file -b --mime-type downloaded_file)
-          EXT="${RAW_NAME##*.}"
-          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          case "$MIME" in
-            video/*) CAT="video" ;;
-            audio/*) CAT="audio" ;;
-            image/*) CAT="image" ;;
-            application/pdf) CAT="document" ;;
-            *) 
-              if [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then CAT="video";
-              elif [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then CAT="audio";
-              elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then CAT="image";
-              elif [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then CAT="document";
-              else CAT="other"; fi ;;
-          esac
-          echo "✅ دسته: $CAT → نام امن: $SAFE_NAME"
+          [ -z "$RAW_NAME" ] && RAW_NAME="file_$(date +%s)"
 
-          # فایل را در پوشه مشترک ذخیره می‌کنیم
-          FINAL_DIR="downloads/all"
-          mkdir -p "$FINAL_DIR"
+          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+
+          mkdir -p out
 
           if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
-            mv downloaded_file "${FINAL_DIR}/${SAFE_NAME}"
+            mv file "out/$SAFE_NAME"
           else
-            ARCHIVE_NAME="dl_${SAFE_NAME}.7z"
             if [ -z "${{ github.event.inputs.password }}" ]; then
-              7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/${ARCHIVE_NAME}" "./downloaded_file"
+              7z a -mx=3 -v${{ github.event.inputs.split_size }} "out/${SAFE_NAME}.7z" file
             else
-              7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "${FINAL_DIR}/${ARCHIVE_NAME}" "./downloaded_file"
+              7z a -p"${{ github.event.inputs.password }}" -mx=3 -v${{ github.event.inputs.split_size }} "out/${SAFE_NAME}.7z" file
             fi
-            rm -f downloaded_file
+            rm file
           fi
-          echo "✅ فایل در $FINAL_DIR ذخیره شد"
-          ls -lh "$FINAL_DIR"
 
-# ------------------------------------------------------------------
-# 3️⃣ Commit & Push (به‌روز شده)
-# ------------------------------------------------------------------
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-${{ strategy.job-index }}
+          path: out/
+
+# -----------------------------------------
+# 3️⃣ commit گروهی با batching
+# -----------------------------------------
   commit:
     needs: download
     runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # اطمینان از احراز هویت
-    steps:
-      - name: 🔄 دریافت کد مخزن (دوباره)
-        uses: actions/checkout@v4
 
-      - name: 📝 Commit & Push
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: temp
+
+      - name: organize files
+        run: |
+          mkdir -p downloads/all
+          find temp -type f -exec mv {} downloads/all/ \;
+
+      - name: batch commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add downloads/
+          BATCH=${{ github.event.inputs.commit_batch_size }}
 
-          # اگر هیچ تغییری نباشد، skip commit
-          if git diff-index --quiet HEAD --; then
-            echo "هیچ تغییر جدیدی وجود ندارد. ادامه می‌شود."
-          else
-            git commit -m "Add downloaded files: $(git status --porcelain | awk '{print $2}')"
-            # push به همان branch که workflow را اجرا کرده (مثلاً refs/heads/main)
+          cd downloads/all
+
+          FILES=(*)
+          TOTAL=${#FILES[@]}
+
+          echo "Total files: $TOTAL"
+          echo "Batch size: $BATCH"
+
+          cd ../../
+
+          INDEX=0
+
+          while [ $INDEX -lt $TOTAL ]; do
+            COUNT=0
+
+            while [ $COUNT -lt $BATCH ] && [ $INDEX -lt $TOTAL ]; do
+              FILE="${FILES[$INDEX]}"
+              git add "downloads/all/$FILE"
+
+              INDEX=$((INDEX+1))
+              COUNT=$((COUNT+1))
+            done
+
+            git commit -m "Add batch of $COUNT files"
             git push
-          fi
+          done
