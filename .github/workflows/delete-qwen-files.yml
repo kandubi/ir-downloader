@@ -1,0 +1,33 @@
+name: 'Delete Qwen Files Fast'
+on:
+  workflow_dispatch:
+
+jobs:
+  delete-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Delete files using find
+        run: |
+          # حذف فایل‌های با الگوی خاص
+          find downloads/all -name "Qwen3.6-27B-AWQ-INT4.7z.*" -type f -delete
+          
+          # یا استفاده از find با حذف مستقیم
+          find downloads/all -name "Qwen3.6-27B-AWQ-INT4.7z.001" -o \
+                                -name "Qwen3.6-27B-AWQ-INT4.7z.002" -o \
+                                -name "Qwen3.6-27B-AWQ-INT4.7z.003" -o \
+                                -name "Qwen3.6-27B-AWQ-INT4.7z.004" -o \
+                                -name "Qwen3.6-27B-AWQ-INT4.7z.005" \
+                                -type f -delete
+          
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          git commit -m "Delete Qwen download files" || echo "No changes to commit"
+          git push origin main
