@@ -1,0 +1,131 @@
+name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: '🔗 لینک مستقیم فایل'
+        required: true
+        type: string
+      download_type:
+        description: '💾 How to store the file: direct or zip'
+        required: false
+        type: choice
+        options:
+          - direct
+          - zip
+        default: direct
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      split_size:
+        description: '📦 حجم هر تکه (مثال: 95m, 100m)'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+# جلوگیری از اجرای همزمان
+concurrency:
+  group: download-and-commit
+  cancel-in-progress: false
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🔄 دریافت کد مخزن
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # مهم برای rebase
+
+      - name: ⚙️ نصب ابزارها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file
+
+      - name: 📥 دانلود فایل
+        run: |
+          URL="${{ github.event.inputs.file_url }}"
+          echo "Downloading: $URL"
+
+          curl -L --fail --retry 5 --retry-delay 5 \
+            --progress-bar -o downloaded_file "$URL"
+
+          ls -lh downloaded_file
+
+      - name: 🧠 تشخیص نوع و نام فایل
+        run: |
+          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
+          [ -z "$RAW_NAME" ] && RAW_NAME="unknown_file"
+
+          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+
+          MIME=$(file -b --mime-type downloaded_file)
+          EXT="${RAW_NAME##*.}"
+          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+
+          if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
+            CAT="video"
+          elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
+            CAT="audio"
+          elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
+            CAT="image"
+          elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
+            CAT="document"
+          else
+            CAT="other"
+          fi
+
+          echo "CAT=$CAT" >> $GITHUB_ENV
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          echo "RAW_NAME=$RAW_NAME" >> $GITHUB_ENV
+
+      - name: 🗜️ پردازش فایل
+        run: |
+          FINAL_DIR="downloads/${{ env.CAT }}/${{ env.SAFE_NAME }}"
+          mkdir -p "$FINAL_DIR"
+
+          mv downloaded_file "${{ env.SAFE_NAME }}"
+
+          if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+            rm -f "$FINAL_DIR"/*
+            mv "${{ env.SAFE_NAME }}" "$FINAL_DIR/"
+          else
+            rm -f "$FINAL_DIR"/*.7z*
+            ARCHIVE_NAME="dl_${{ env.SAFE_NAME }}.7z"
+
+            if [ -z "${{ github.event.inputs.password }}" ]; then
+              7z a -mx=3 -mhe=on -v${{ github.event.inputs.split_size }} \
+                "$FINAL_DIR/$ARCHIVE_NAME" "./${{ env.SAFE_NAME }}"
+            else
+              7z a -p"${{ github.event.inputs.password }}" -mx=3 -mhe=on \
+                -v${{ github.event.inputs.split_size }} \
+                "$FINAL_DIR/$ARCHIVE_NAME" "./${{ env.SAFE_NAME }}"
+            fi
+          fi
+
+          ls -lh "$FINAL_DIR"
+
+      - name: 📝 commit & push (هوشمند)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add downloads/
+
+          git commit -m "Add: ${{ env.SAFE_NAME }} (cat: ${{ env.CAT }})" || echo "Nothing to commit"
+
+          # تلاش چندباره برای جلوگیری از conflict
+          for i in {1..5}; do
+            git pull --rebase origin main && \
+            git push origin main && break
+
+            echo "Retry $i..."
+            sleep 3
+          done

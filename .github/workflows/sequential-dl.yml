@@ -1,0 +1,113 @@
+name: '📦 دانلود ترتیبی + commit per batch'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: '🔗 لینک‌ها (کاما یا newline)'
+        required: true
+        type: string
+
+      commit_batch_size:
+        description: '📦 تعداد فایل در هر batch'
+        required: false
+        type: number
+        default: 5
+
+      download_type:
+        description: '💾 نوع ذخیره'
+        required: false
+        type: choice
+        options: [direct, zip]
+        default: direct
+
+      password:
+        description: '🔐 (فقط برای zip)'
+        required: false
+        type: string
+        default: ''
+
+      split_size:
+        description: '📦 (فقط برای zip)'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+jobs:
+  sequential-download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full jq file
+
+      - name: process sequential batches
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^ *//;s/ *$//')
+          mapfile -t urls < <(printf '%s\n' "$raw" | sed '/^$/d')
+
+          BATCH=${{ github.event.inputs.commit_batch_size }}
+
+          mkdir -p downloads/all
+
+          total=${#urls[@]}
+          index=0
+          batch_id=1
+
+          while [ $index -lt $total ]; do
+            echo "🚀 شروع batch $batch_id"
+
+            count=0
+
+            while [ $count -lt $BATCH ] && [ $index -lt $total ]; do
+              URL="${urls[$index]}"
+              echo "⬇️ $URL"
+
+              if ! curl -L --fail --retry 5 --retry-delay 5 -o file "$URL"; then
+                echo "::warning::fail $URL"
+                index=$((index+1))
+                continue
+              fi
+
+              RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
+              [ -z "$RAW_NAME" ] && RAW_NAME="file_$(date +%s)"
+
+              SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+
+              if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+                mv file "downloads/all/$SAFE_NAME"
+              else
+                if [ -z "${{ github.event.inputs.password }}" ]; then
+                  7z a -mx=3 -v${{ github.event.inputs.split_size }} "downloads/all/${SAFE_NAME}.7z" file
+                else
+                  7z a -p"${{ github.event.inputs.password }}" -mx=3 -v${{ github.event.inputs.split_size }} "downloads/all/${SAFE_NAME}.7z" file
+                fi
+                rm file
+              fi
+
+              index=$((index+1))
+              count=$((count+1))
+            done
+
+            # commit بعد از هر batch
+            git add downloads/
+
+            if git diff-index --quiet HEAD --; then
+              echo "no changes"
+            else
+              git commit -m "Batch $batch_id commit ($count files)"
+              git push
+            fi
+
+            batch_id=$((batch_id+1))
+          done

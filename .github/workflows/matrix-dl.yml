@@ -1,0 +1,183 @@
+name: '📦 دانلود گروهی + commit ایمن (rebase loop)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: '🔗 لینک‌ها (کاما یا newline)'
+        required: true
+        type: string
+
+      commit_batch_size:
+        description: '📦 تعداد فایل در هر batch/job'
+        required: false
+        type: number
+        default: 5
+
+      download_type:
+        description: '💾 نوع ذخیره'
+        required: false
+        type: choice
+        options: [direct, zip]
+        default: direct
+
+      password:
+        description: '🔐 (فقط برای zip)'
+        required: false
+        type: string
+        default: ''
+
+      split_size:
+        description: '📦 (فقط برای zip)'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+jobs:
+# -----------------------------------------
+# 1️⃣ ساخت batch matrix
+# -----------------------------------------
+  create-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      batches: ${{ steps.make.outputs.batches }}
+
+    steps:
+      - id: make
+        run: |
+          raw=$(echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^ *//;s/ *$//')
+      
+          mapfile -t urls < <(printf '%s\n' "$raw" | sed '/^$/d')
+      
+          BATCH=${{ github.event.inputs.commit_batch_size }}
+      
+          result="[]"
+          batch=()
+          count=0
+      
+          for url in "${urls[@]}"; do
+            batch+=("$url")
+            count=$((count+1))
+      
+            if [ "$count" -eq "$BATCH" ]; then
+              json=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -s .)
+              result=$(echo "$result" | jq -c ". + [$json]")
+              batch=()
+              count=0
+            fi
+          done
+      
+          if [ ${#batch[@]} -gt 0 ]; then
+            json=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -s .)
+            result=$(echo "$result" | jq -c ". + [$json]")
+          fi
+      
+          echo "Generated batches:"
+          echo "$result"
+      
+          # ✅ مهم: استفاده از multiline output
+          {
+            echo "batches<<EOF"
+            echo "$result"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+# -----------------------------------------
+# 2️⃣ دانلود + commit ایمن
+# -----------------------------------------
+  download-and-commit:
+    needs: create-matrix
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: ${{ fromJson(needs.create-matrix.outputs.batches) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file jq
+
+      - name: download batch
+        run: |
+          mkdir -p downloads/all
+
+          echo '${{ toJson(matrix.batch) }}' | jq -r '.[]' > urls.txt
+
+          while read -r URL; do
+            echo "⬇️ $URL"
+
+            if ! curl -L --fail --retry 5 --retry-delay 5 -o file "$URL"; then
+              echo "::warning::fail $URL"
+              continue
+            fi
+
+            RAW_NAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
+            [ -z "$RAW_NAME" ] && RAW_NAME="file_$(date +%s)"
+
+            SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
+
+            if [[ "${{ github.event.inputs.download_type }}" == "direct" ]]; then
+              mv file "downloads/all/$SAFE_NAME"
+            else
+              if [ -z "${{ github.event.inputs.password }}" ]; then
+                7z a -mx=3 -v${{ github.event.inputs.split_size }} "downloads/all/${SAFE_NAME}.7z" file
+              else
+                7z a -p"${{ github.event.inputs.password }}" -mx=3 -v${{ github.event.inputs.split_size }} "downloads/all/${SAFE_NAME}.7z" file
+              fi
+              rm file
+            fi
+
+          done < urls.txt
+
+      - name: commit safely (rebase loop)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add downloads/
+
+          if git diff-index --quiet HEAD --; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Batch commit: ${{ strategy.job-index }}"
+
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+          echo "🚀 شروع push ایمن با rebase loop روی $BRANCH"
+
+          for i in {1..10}; do
+            echo "🔁 تلاش $i"
+
+            # گرفتن آخرین تغییرات
+            git fetch origin $BRANCH
+
+            # rebase روی آخرین نسخه
+            if ! git rebase origin/$BRANCH; then
+              echo "⚠️ rebase conflict → abort و retry"
+              git rebase --abort
+              sleep 2
+              continue
+            fi
+
+            # تلاش برای push
+            if git push origin HEAD:$BRANCH; then
+              echo "✅ push موفق"
+              exit 0
+            fi
+
+            echo "⚠️ push fail → retry..."
+            sleep 2
+          done
+
+          echo "::error::Push failed after multiple retries"
+          exit 1
